@@ -209,6 +209,8 @@ export default function App() {
         } else {
           partial = await runStage(stage, ctx);
         }
+        const missing = stage.fields.filter((f) => partial[f] === undefined);
+        if (missing.length) throw new Error(`Stage "${stage.key}" response is missing: ${missing.join(", ")}`);
       } catch {
         setErrMsg(sampleMatch
           ? "Something went wrong generating this stage."
@@ -338,7 +340,7 @@ export default function App() {
                     {brief.outline.map((s, i) => (
                       <div key={i}>
                         <div style={{ fontSize: 14.5, fontWeight: 600, color: C.text, marginBottom: 5 }}><span style={{ color: C.cyan, fontFamily: "ui-monospace, monospace", fontSize: 12, marginRight: 8 }}>H2</span>{s.h2}</div>
-                        <ul style={{ ...ulStyle, marginTop: 0 }}>{s.points.map((p, j) => <li key={j} style={liStyle}>{p}</li>)}</ul>
+                        <ul style={{ ...ulStyle, marginTop: 0 }}>{(s.points || []).map((p, j) => <li key={j} style={liStyle}>{p}</li>)}</ul>
                       </div>
                     ))}
                   </div>
