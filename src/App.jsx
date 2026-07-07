@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useState } from "react";
 
 const C = {
   ink: "#0B1220", panel: "#121A2B", line: "#1F2A3D", mute: "#7C8AA5",
@@ -8,11 +8,31 @@ const C = {
 const STATES = { idle: "idle", running: "running", done: "done", error: "error" };
 
 const STAGES = [
-  { key: "intent", label: "Search intent + buyer stage" },
-  { key: "serp", label: "SERP angle + differentiation" },
-  { key: "geo", label: "GEO / AI-overview optimization" },
-  { key: "entities", label: "Entity + topic coverage" },
-  { key: "outline", label: "Draft outline + internal links" },
+  {
+    key: "intent", label: "Search intent + buyer stage",
+    fields: ["searchIntent", "buyerStage", "estDifficulty"],
+    buildPrompt: (ctx) => `You are an expert B2B and cybersecurity SEO/GEO strategist.\nTarget keyword: "${ctx.primaryKeyword}"\nAudience: "${ctx.audience}"\n\nReturn ONLY a valid JSON object (no markdown, no backticks, no preamble) with this exact shape:\n{ "searchIntent": string, "buyerStage": string, "estDifficulty": string }\nBe specific to the B2B/cyber buyer.`,
+  },
+  {
+    key: "serp", label: "SERP angle + differentiation",
+    fields: ["serpAngle"],
+    buildPrompt: (ctx) => `Target keyword: "${ctx.primaryKeyword}"\nAudience: "${ctx.audience}"\nSearch intent: ${ctx.searchIntent} | Buyer stage: ${ctx.buyerStage} | Difficulty: ${ctx.estDifficulty}\n\nReturn ONLY a valid JSON object: { "serpAngle": string }\nDescribe the specific angle that wins the SERP against current top-ranking pages — the thing competitors avoid or stay too abstract about.`,
+  },
+  {
+    key: "geo", label: "GEO / AI-overview optimization",
+    fields: ["geoOptimization"],
+    buildPrompt: (ctx) => `Target keyword: "${ctx.primaryKeyword}"\nAudience: "${ctx.audience}"\nSERP angle: ${ctx.serpAngle}\n\nReturn ONLY a valid JSON object: { "geoOptimization": [string] }\nList 3-5 concrete GEO / AI-overview tactics (structured data, definitional answer blocks, original data points, entity clarity) specific to this keyword.`,
+  },
+  {
+    key: "entities", label: "Entity + topic coverage",
+    fields: ["secondaryKeywords", "entities", "questions"],
+    buildPrompt: (ctx) => `Target keyword: "${ctx.primaryKeyword}"\nAudience: "${ctx.audience}"\nSERP angle: ${ctx.serpAngle}\nGEO tactics: ${JSON.stringify(ctx.geoOptimization)}\n\nReturn ONLY a valid JSON object: { "secondaryKeywords": [string], "entities": [string], "questions": [string] }\nsecondaryKeywords: 6-8 related keywords. entities: 8-10 named concepts/terms a top-ranking page must cover. questions: 4-6 real questions buyers ask.`,
+  },
+  {
+    key: "outline", label: "Draft outline + internal links",
+    fields: ["outline", "internalLinks", "metaTitle", "metaDescription"],
+    buildPrompt: (ctx) => `Target keyword: "${ctx.primaryKeyword}"\nAudience: "${ctx.audience}"\nSERP angle: ${ctx.serpAngle}\nEntities to cover: ${JSON.stringify(ctx.entities)}\nQuestions to answer: ${JSON.stringify(ctx.questions)}\n\nReturn ONLY a valid JSON object:\n{ "outline": [ { "h2": string, "points": [string] } ], "internalLinks": [string], "metaTitle": string, "metaDescription": string }\noutline: 5-6 H2 sections with 2-3 points each, building a logical page structure. internalLinks: 3-4 related topics to link to. metaTitle: under 60 chars. metaDescription: under 155 chars.`,
+  },
 ];
 
 const SAMPLES = {
@@ -100,6 +120,28 @@ const SAMPLES = {
   },
 };
 
+function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+function pick(obj, keys) {
+  const out = {};
+  keys.forEach((k) => { if (obj[k] !== undefined) out[k] = obj[k]; });
+  return out;
+}
+
+async function runStage(stage, ctx) {
+  const res = await fetch("/api/generate-brief", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt: stage.buildPrompt(ctx) }),
+  });
+  const data = await res.json();
+  const raw = data.content.filter((b) => b.type === "text").map((b) => b.text).join("").replace(/```json|```/g, "").trim();
+  return JSON.parse(raw);
+}
+
+function findSample(keyword) {
+  return SAMPLES[keyword] || Object.values(SAMPLES).find((s) => s.primaryKeyword.toLowerCase() === keyword.trim().toLowerCase());
+}
+
 function Stat({ label, value }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
@@ -132,6 +174,10 @@ function Section({ n, title, children }) {
   );
 }
 
+function Pending() {
+  return <p style={{ margin: 0, color: C.mute, fontSize: 13, fontStyle: "italic" }}>Waiting on this stage…</p>;
+}
+
 export default function App() {
   const [keyword, setKeyword] = useState("SOC 2 compliance automation");
   const [audience, setAudience] = useState("Security & compliance leaders at B2B SaaS");
@@ -140,60 +186,54 @@ export default function App() {
   const [brief, setBrief] = useState(null);
   const [errMsg, setErrMsg] = useState("");
   const [usedLive, setUsedLive] = useState(false);
-  const stageTimer = useRef(null);
 
-  function runStageAnimation(after) {
-    setStageIdx(0);
-    let i = 0;
-    stageTimer.current = setInterval(() => {
-      i += 1;
-      if (i >= STAGES.length) { clearInterval(stageTimer.current); setStageIdx(STAGES.length); after(); }
-      else { setStageIdx(i); }
-    }, 600);
-  }
-
-  function runSample() {
-    const match = SAMPLES[keyword] || Object.values(SAMPLES).find((s) => s.primaryKeyword.toLowerCase() === keyword.trim().toLowerCase());
-    if (!match) return false;
-    setStatus(STATES.running); setBrief(null); setErrMsg(""); setUsedLive(false);
-    runStageAnimation(() => { setBrief(match); setStatus(STATES.done); });
-    return true;
-  }
-
-  async function runLive() {
-    setStatus(STATES.running); setBrief(null); setErrMsg(""); setUsedLive(true); setStageIdx(0);
-    let i = 0;
-    stageTimer.current = setInterval(() => { i = Math.min(i + 1, STAGES.length - 1); setStageIdx(i); }, 1100);
-    const prompt = "You are an expert B2B and cybersecurity SEO/GEO strategist producing a content brief.\n\nTarget keyword: \"" + keyword + "\"\nAudience: \"" + audience + "\"\n\nReturn ONLY a valid JSON object (no markdown, no backticks, no preamble) with this exact shape:\n{\n  \"primaryKeyword\": string,\n  \"searchIntent\": string,\n  \"buyerStage\": string,\n  \"estDifficulty\": string,\n  \"serpAngle\": string,\n  \"geoOptimization\": [string],\n  \"secondaryKeywords\": [string],\n  \"entities\": [string],\n  \"questions\": [string],\n  \"outline\": [ { \"h2\": string, \"points\": [string] } ],\n  \"internalLinks\": [string],\n  \"metaTitle\": string,\n  \"metaDescription\": string\n}\nBe specific to the B2B/cyber buyer. GEO tactics must be concrete (structured data, definitional answer blocks, original data, entity clarity).";
-    try {
-      const res = await fetch("/api/generate-brief", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt }),
-      });
-      const data = await res.json();
-      const raw = data.content.filter((b) => b.type === "text").map((b) => b.text).join("").replace(/```json|```/g, "").trim();
-      const parsed = JSON.parse(raw);
-      clearInterval(stageTimer.current); setStageIdx(STAGES.length); setBrief(parsed); setStatus(STATES.done);
-    } catch (e) {
-      clearInterval(stageTimer.current);
-      setErrMsg("Live generation isn't wired to a backend in this deploy. Try one of the sample keywords above for an instant brief.");
-      setStatus(STATES.error);
-    }
-  }
-
-  function generate() {
+  async function runPipeline() {
     if (!keyword.trim()) return;
-    if (!runSample()) runLive();
+    const sampleMatch = findSample(keyword);
+
+    setStatus(STATES.running);
+    setErrMsg("");
+    setUsedLive(!sampleMatch);
+    setStageIdx(0);
+    setBrief({ primaryKeyword: keyword, audience });
+
+    let ctx = { primaryKeyword: keyword, audience };
+    for (let i = 0; i < STAGES.length; i++) {
+      setStageIdx(i);
+      const stage = STAGES[i];
+      let partial;
+      try {
+        if (sampleMatch) {
+          await sleep(600);
+          partial = pick(sampleMatch, stage.fields);
+        } else {
+          partial = await runStage(stage, ctx);
+        }
+        const missing = stage.fields.filter((f) => partial[f] === undefined);
+        if (missing.length) throw new Error(`Stage "${stage.key}" response is missing: ${missing.join(", ")}`);
+      } catch {
+        setErrMsg(sampleMatch
+          ? "Something went wrong generating this stage."
+          : "Live generation isn't wired to a backend in this deploy. Try one of the sample keywords above for an instant brief.");
+        setStatus(STATES.error);
+        return;
+      }
+      ctx = { ...ctx, ...partial };
+      setBrief((b) => ({ ...b, ...partial }));
+    }
+    setStageIdx(STAGES.length);
+    setStatus(STATES.done);
   }
 
   function copyBrief() {
     if (!brief) return;
     const t = "CONTENT BRIEF — " + brief.primaryKeyword + "\nIntent: " + brief.searchIntent + " | Stage: " + brief.buyerStage + " | Difficulty: " + brief.estDifficulty + "\n\nSERP ANGLE\n" + brief.serpAngle + "\n\nGEO / AI-OVERVIEW\n" + brief.geoOptimization.map((x) => "• " + x).join("\n") + "\n\nSECONDARY KEYWORDS\n" + brief.secondaryKeywords.join(", ") + "\n\nENTITIES TO COVER\n" + brief.entities.join(", ") + "\n\nQUESTIONS TO ANSWER\n" + brief.questions.map((x) => "• " + x).join("\n") + "\n\nOUTLINE\n" + brief.outline.map((s) => "## " + s.h2 + "\n" + s.points.map((p) => "  - " + p).join("\n")).join("\n\n") + "\n\nINTERNAL LINKS\n" + brief.internalLinks.map((x) => "• " + x).join("\n") + "\n\nMETA TITLE: " + brief.metaTitle + "\nMETA DESCRIPTION: " + brief.metaDescription;
-    navigator.clipboard && navigator.clipboard.writeText(t);
+    if (navigator.clipboard) navigator.clipboard.writeText(t);
   }
 
   const running = status === STATES.running;
-  const isSampleKw = !!(SAMPLES[keyword] || Object.values(SAMPLES).find((s) => s.primaryKeyword.toLowerCase() === keyword.trim().toLowerCase()));
+  const isSampleKw = !!findSample(keyword);
+  const showResults = !!brief && brief.searchIntent !== undefined;
 
   return (
     <div style={{ minHeight: "100vh", background: "radial-gradient(900px 500px at 80% -10%, rgba(34,211,238,.08), transparent), " + C.ink, color: C.text, fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, sans-serif", padding: "28px 20px 64px" }}>
@@ -205,7 +245,7 @@ export default function App() {
               <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 12, letterSpacing: ".18em", color: C.mute }}>SEO / GEO BRIEF ENGINE</span>
             </div>
             <h1 style={{ margin: "10px 0 0", fontSize: 28, fontWeight: 700, letterSpacing: "-.02em", lineHeight: 1.1 }}>From keyword to ranking brief — in one pass</h1>
-            <p style={{ margin: "8px 0 0", color: C.mute, fontSize: 14, maxWidth: 560 }}>Built for B2B & cybersecurity search. Generates intent, SERP angle, GEO tactics for AI overviews, entity coverage, and a draft outline.</p>
+            <p style={{ margin: "8px 0 0", color: C.mute, fontSize: 14, maxWidth: 560 }}>Built for B2B & cybersecurity search. Runs as a 5-stage pipeline — intent, SERP angle, GEO tactics, entity coverage, then outline — each stage rendering as soon as it's ready.</p>
           </div>
         </div>
 
@@ -213,22 +253,22 @@ export default function App() {
           <div style={{ display: "grid", gap: 14 }}>
             <label style={{ display: "grid", gap: 6 }}>
               <span style={{ fontSize: 12, letterSpacing: ".06em", textTransform: "uppercase", color: C.mute }}>Target keyword</span>
-              <input value={keyword} onChange={(e) => setKeyword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && !running && generate()} placeholder="e.g. zero trust network access" style={inputStyle} />
+              <input value={keyword} onChange={(e) => setKeyword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && !running && runPipeline()} placeholder="e.g. zero trust network access" style={inputStyle} />
             </label>
             <label style={{ display: "grid", gap: 6 }}>
               <span style={{ fontSize: 12, letterSpacing: ".06em", textTransform: "uppercase", color: C.mute }}>Audience</span>
-              <input value={audience} onChange={(e) => setAudience(e.target.value)} onKeyDown={(e) => e.key === "Enter" && !running && generate()} style={inputStyle} />
+              <input value={audience} onChange={(e) => setAudience(e.target.value)} onKeyDown={(e) => e.key === "Enter" && !running && runPipeline()} style={inputStyle} />
             </label>
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-              <button onClick={generate} disabled={running} style={{ background: running ? C.cyanDim : C.cyan, color: C.ink, border: "none", borderRadius: 9, padding: "11px 20px", fontSize: 14, fontWeight: 700, cursor: running ? "default" : "pointer" }}>{running ? "Analyzing…" : isSampleKw ? "Generate brief" : "Generate (live)"}</button>
-              {brief && <button onClick={copyBrief} style={ghostBtn}>Copy brief</button>}
+              <button onClick={runPipeline} disabled={running} style={{ background: running ? C.cyanDim : C.cyan, color: C.ink, border: "none", borderRadius: 9, padding: "11px 20px", fontSize: 14, fontWeight: 700, cursor: running ? "default" : "pointer" }}>{running ? "Running pipeline…" : isSampleKw ? "Run pipeline" : "Run pipeline (live)"}</button>
+              {status === STATES.done && <button onClick={copyBrief} style={ghostBtn}>Copy brief</button>}
               <div style={{ display: "flex", gap: 6, marginLeft: "auto", flexWrap: "wrap" }}>
                 {Object.keys(SAMPLES).map((k) => (
                   <button key={k} onClick={() => { setKeyword(k); setAudience(SAMPLES[k].audience); }} style={chip}>{k}</button>
                 ))}
               </div>
             </div>
-            <p style={{ margin: 0, fontSize: 12, color: C.mute }}>{isSampleKw ? "Instant sample — works for any viewer, no account needed." : "Custom keyword calls a serverless proxy to the Anthropic API. Pick a sample chip for an instant demo."}</p>
+            <p style={{ margin: 0, fontSize: 12, color: C.mute }}>{isSampleKw ? "Instant sample pipeline — works for any viewer, no account needed." : "Custom keyword runs 5 sequential calls to a serverless proxy, each stage feeding the next. Pick a sample chip for an instant demo."}</p>
           </div>
 
           {status !== STATES.idle && (
@@ -249,7 +289,7 @@ export default function App() {
           {status === STATES.error && <div style={{ marginTop: 14, color: C.amber, fontSize: 13 }}>{errMsg}</div>}
         </div>
 
-        {brief && status === STATES.done && (
+        {showResults && (
           <div style={{ marginTop: 22, background: C.panel, border: "1px solid " + C.line, borderRadius: 14, padding: "20px 22px 26px" }}>
             <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 14, alignItems: "flex-start" }}>
               <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, letterSpacing: "-.01em" }}>{brief.primaryKeyword}</h2>
@@ -264,47 +304,65 @@ export default function App() {
               <Stat label="Difficulty" value={brief.estDifficulty} />
             </div>
 
-            <Section n="01" title="SERP angle">
-              <p style={{ margin: 0, color: C.text, fontSize: 14.5, lineHeight: 1.6 }}>{brief.serpAngle}</p>
-            </Section>
+            {(brief.serpAngle || running) && (
+              <Section n="01" title="SERP angle">
+                {brief.serpAngle ? <p style={{ margin: 0, color: C.text, fontSize: 14.5, lineHeight: 1.6 }}>{brief.serpAngle}</p> : <Pending />}
+              </Section>
+            )}
 
-            <Section n="02" title="GEO / AI-overview optimization">
-              <ul style={ulStyle}>{brief.geoOptimization.map((x, i) => <li key={i} style={liStyle}>{x}</li>)}</ul>
-            </Section>
+            {(brief.geoOptimization || running) && (
+              <Section n="02" title="GEO / AI-overview optimization">
+                {brief.geoOptimization ? <ul style={ulStyle}>{brief.geoOptimization.map((x, i) => <li key={i} style={liStyle}>{x}</li>)}</ul> : <Pending />}
+              </Section>
+            )}
 
-            <Section n="03" title="Keyword + entity coverage">
-              <div style={{ display: "grid", gap: 14 }}>
-                <div><div style={subLabel}>Secondary keywords</div><div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>{brief.secondaryKeywords.map((k, i) => <Pill key={i} tone="cyan">{k}</Pill>)}</div></div>
-                <div><div style={subLabel}>Entities a top page must cover</div><div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>{brief.entities.map((k, i) => <Pill key={i} tone="green">{k}</Pill>)}</div></div>
-              </div>
-            </Section>
-
-            <Section n="04" title="Questions to answer">
-              <ul style={ulStyle}>{brief.questions.map((x, i) => <li key={i} style={liStyle}>{x}</li>)}</ul>
-            </Section>
-
-            <Section n="05" title="Draft outline">
-              <div style={{ display: "grid", gap: 14 }}>
-                {brief.outline.map((s, i) => (
-                  <div key={i}>
-                    <div style={{ fontSize: 14.5, fontWeight: 600, color: C.text, marginBottom: 5 }}><span style={{ color: C.cyan, fontFamily: "ui-monospace, monospace", fontSize: 12, marginRight: 8 }}>H2</span>{s.h2}</div>
-                    <ul style={{ ...ulStyle, marginTop: 0 }}>{s.points.map((p, j) => <li key={j} style={liStyle}>{p}</li>)}</ul>
+            {(brief.entities || running) && (
+              <Section n="03" title="Keyword + entity coverage">
+                {brief.entities ? (
+                  <div style={{ display: "grid", gap: 14 }}>
+                    <div><div style={subLabel}>Secondary keywords</div><div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>{brief.secondaryKeywords.map((k, i) => <Pill key={i} tone="cyan">{k}</Pill>)}</div></div>
+                    <div><div style={subLabel}>Entities a top page must cover</div><div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>{brief.entities.map((k, i) => <Pill key={i} tone="green">{k}</Pill>)}</div></div>
                   </div>
-                ))}
-              </div>
-            </Section>
+                ) : <Pending />}
+              </Section>
+            )}
 
-            <Section n="06" title="Internal links + metadata">
-              <div style={{ display: "grid", gap: 14 }}>
-                <div><div style={subLabel}>Link to</div><ul style={ulStyle}>{brief.internalLinks.map((x, i) => <li key={i} style={liStyle}>{x}</li>)}</ul></div>
-                <div style={{ background: C.ink, border: "1px solid " + C.line, borderRadius: 10, padding: 14 }}>
-                  <div style={subLabel}>Search snippet preview</div>
-                  <div style={{ color: "#8AB4F8", fontSize: 16, lineHeight: 1.3 }}>{brief.metaTitle}</div>
-                  <div style={{ color: C.green, fontSize: 12, margin: "2px 0 4px" }}>example.com › resources › guide</div>
-                  <div style={{ color: C.mute, fontSize: 13, lineHeight: 1.5 }}>{brief.metaDescription}</div>
-                </div>
-              </div>
-            </Section>
+            {(brief.questions || running) && (
+              <Section n="04" title="Questions to answer">
+                {brief.questions ? <ul style={ulStyle}>{brief.questions.map((x, i) => <li key={i} style={liStyle}>{x}</li>)}</ul> : <Pending />}
+              </Section>
+            )}
+
+            {(brief.outline || running) && (
+              <Section n="05" title="Draft outline">
+                {brief.outline ? (
+                  <div style={{ display: "grid", gap: 14 }}>
+                    {brief.outline.map((s, i) => (
+                      <div key={i}>
+                        <div style={{ fontSize: 14.5, fontWeight: 600, color: C.text, marginBottom: 5 }}><span style={{ color: C.cyan, fontFamily: "ui-monospace, monospace", fontSize: 12, marginRight: 8 }}>H2</span>{s.h2}</div>
+                        <ul style={{ ...ulStyle, marginTop: 0 }}>{(s.points || []).map((p, j) => <li key={j} style={liStyle}>{p}</li>)}</ul>
+                      </div>
+                    ))}
+                  </div>
+                ) : <Pending />}
+              </Section>
+            )}
+
+            {(brief.internalLinks || running) && (
+              <Section n="06" title="Internal links + metadata">
+                {brief.internalLinks ? (
+                  <div style={{ display: "grid", gap: 14 }}>
+                    <div><div style={subLabel}>Link to</div><ul style={ulStyle}>{brief.internalLinks.map((x, i) => <li key={i} style={liStyle}>{x}</li>)}</ul></div>
+                    <div style={{ background: C.ink, border: "1px solid " + C.line, borderRadius: 10, padding: 14 }}>
+                      <div style={subLabel}>Search snippet preview</div>
+                      <div style={{ color: "#8AB4F8", fontSize: 16, lineHeight: 1.3 }}>{brief.metaTitle}</div>
+                      <div style={{ color: C.green, fontSize: 12, margin: "2px 0 4px" }}>example.com › resources › guide</div>
+                      <div style={{ color: C.mute, fontSize: 13, lineHeight: 1.5 }}>{brief.metaDescription}</div>
+                    </div>
+                  </div>
+                ) : <Pending />}
+              </Section>
+            )}
           </div>
         )}
 
